@@ -1,12 +1,15 @@
 // Keyboard and pointer input. Held keys give a steering vector; one-shot presses (start or
-// restart, dash, pause, mute) are queued as bit flags and taken once by the loop, so a press
-// between two frames is never lost and never counted twice. The mouse position is tracked in
-// playfield coordinates for aiming.
+// restart, dash, pause, mute, draft picks) are queued as bit flags and taken once by the
+// loop, so a press between two frames is never lost and never counted twice. The mouse
+// position is tracked in playfield coordinates for aiming and for draft-card clicks.
 
 export const ACTION_CONFIRM = 1;
 export const ACTION_DASH = 2;
 export const ACTION_PAUSE = 4;
 export const ACTION_MUTE = 8;
+export const ACTION_PICK1 = 16;
+export const ACTION_PICK2 = 32;
+export const ACTION_PICK3 = 64;
 
 const LEFT = new Set(['ArrowLeft', 'KeyA']);
 const RIGHT = new Set(['ArrowRight', 'KeyD']);
@@ -16,6 +19,7 @@ const CONFIRM = new Set(['Space', 'Enter']);
 const DASH = new Set(['ShiftLeft', 'ShiftRight', 'KeyJ']);
 const PAUSE = new Set(['KeyP', 'Escape']);
 const MUTE = new Set(['KeyM']);
+const PICK = new Map([['Digit1', ACTION_PICK1], ['Digit2', ACTION_PICK2], ['Digit3', ACTION_PICK3]]);
 
 export function createInput(target, toField) {
   let left = false;
@@ -25,6 +29,8 @@ export function createInput(target, toField) {
   let firing = false;
   let actions = 0;
   const mouse = { x: 0, y: 0, inside: false };
+  // The last pointer-down point, for draft-card clicks; cleared when taken.
+  let click = null;
 
   function trackMouse(event) {
     const point = toField(event.clientX, event.clientY);
@@ -46,6 +52,8 @@ export function createInput(target, toField) {
       if (!event.repeat) actions |= ACTION_PAUSE;
     } else if (MUTE.has(event.code)) {
       if (!event.repeat) actions |= ACTION_MUTE;
+    } else if (PICK.has(event.code)) {
+      if (!event.repeat) actions |= PICK.get(event.code);
     } else return;
     event.preventDefault();
   });
@@ -67,6 +75,7 @@ export function createInput(target, toField) {
     trackMouse(event);
     firing = true;
     actions |= ACTION_CONFIRM;
+    click = { x: mouse.x, y: mouse.y };
   });
   target.addEventListener('pointerup', () => {
     firing = false;
@@ -91,6 +100,12 @@ export function createInput(target, toField) {
     takeActions() {
       const taken = actions;
       actions = 0;
+      return taken;
+    },
+    /** The last pointer-down point since the last call, or null. */
+    takeClick() {
+      const taken = click;
+      click = null;
       return taken;
     },
   };

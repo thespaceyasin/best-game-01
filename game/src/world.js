@@ -1,11 +1,18 @@
 // The game's rules and state, with no drawing and no browser in it: the player ship, the
-// enemy waves, bullets, star shards, power-ups and particles, collisions, score, combo and
-// lives. step() advances one fixed step and returns what happened as bit flags, so the caller
-// can react (sounds, announcements) without the world knowing about screens or audio.
+// nine nights, the Night Wardens (bosses), the ember-boon draft, bullets, star shards,
+// power-ups and particles, collisions, score, combo and lives. step() advances one fixed
+// step and returns what happened as bit flags, so the caller can react (sounds,
+// announcements) without the world knowing about screens or audio.
 // Nothing here allocates after createWorld returns: every pool is fixed at boot.
 
-import { COMBO, ENEMY, FIELD, LIVES, PALETTE, PARTICLE, PLAYER, POWERUP, SHARD, STARS, WAVE, WAVE_COST } from './config.js';
-import { pickWeighted } from './random.js';
+import { BOONS, BOSS, BOSS_NIGHTS, COMBO, ENEMY, FIELD, LIVES, MAX_LIVES, NIGHTS, PALETTE, PARTICLE, PLAYER, POWERUP, SHARD, STARS, WAVE, WAVE_COST } from './config.js';
+import { createRandom, pickWeighted } from './random.js';
+
+/** What felled the keeper, for the death screen (roguelike: seed, depth, cause). */
+const DEATH_NAMES = {
+  drifter: 'AN EMBER DRIFTER', dart: 'AN EMBER DART', spinner: 'A SPINNER',
+  splitter: 'A SPLITTER', wisp: 'A WISP', brute: 'A BRUTE',
+};
 
 export const EVENT_HIT = 1;
 export const EVENT_OVER = 2;
@@ -14,11 +21,17 @@ export const EVENT_PICKUP = 8;
 export const EVENT_POWERUP = 16;
 export const EVENT_SHOOT = 32;
 export const EVENT_DASH = 64;
+export const EVENT_BOSS = 128;
+export const EVENT_WIN = 256;
+export const EVENT_BOON = 512;
 
 const KIND_DRIFTER = 'drifter';
 const KIND_DART = 'dart';
 const KIND_SPINNER = 'spinner';
 const KIND_SPLITTER = 'splitter';
+const KIND_WISP = 'wisp';
+const KIND_BRUTE = 'brute';
+const KIND_BOSS = 'boss';
 
 function dist2(ax, ay, bx, by) {
   const dx = ax - bx;
@@ -26,18 +39,34 @@ function dist2(ax, ay, bx, by) {
   return dx * dx + dy * dy;
 }
 
+function defaultStats() {
+  return {
+    damage: PLAYER.bulletDamage,
+    fireInterval: PLAYER.fireInterval,
+    fireRange: PLAYER.fireRange,
+    bulletSpeed: PLAYER.bulletSpeed,
+    maxSpeed: PLAYER.maxSpeed,
+    shots: 1,
+    pierce: 0,
+    magnetRadius: SHARD.magnetRadius,
+    dashCooldown: PLAYER.dashCooldown,
+    comboWindow: COMBO.window,
+  };
+}
+
 export function createWorld(random) {
   const player = {
     x: FIELD.width / 2, y: FIELD.height / 2, vx: 0, vy: 0, angle: -Math.PI / 2,
     fireTimer: 0, dashTimer: 0, dashCooldown: 0, dashX: 0, dashY: 0,
     invulnerable: 0, shield: false, rapidTimer: 0, magnetTimer: 0,
+    stats: defaultStats(),
   };
   const enemies = [];
   for (let i = 0; i < WAVE.maxConcurrent; i += 1) {
-    enemies.push({ active: false, kind: KIND_DRIFTER, x: 0, y: 0, vx: 0, vy: 0, hp: 1, radius: 16, speed: 90, score: 10, shards: 1, age: 0, phase: 0 });
+    enemies.push({ active: false, kind: KIND_DRIFTER, x: 0, y: 0, vx: 0, vy: 0, hp: 1, maxHp: 1, radius: 16, speed: 90, score: 10, shards: 1, age: 0, phase: 0, name: '', minionTimer: 0, flash: 0 });
   }
   const bullets = [];
-  for (let i = 0; i < 48; i += 1) bullets.push({ active: false, x: 0, y: 0, vx: 0, vy: 0, life: 0 });
+  for (let i = 0; i < 64; i += 1) bullets.push({ active: false, x: 0, y: 0, vx: 0, vy: 0, life: 0, pierce: 0, last: null });
   const shards = [];
   for (let i = 0; i < 64; i += 1) shards.push({ active: false, x: 0, y: 0, vx: 0, vy: 0, life: 0 });
   const powerups = [];
@@ -53,11 +82,15 @@ export function createWorld(random) {
     }
   }
   const queue = [];
+  // The draft rolls on its own sub-seed, so how the player fights never shifts which
+  // boons are offered (roguelike: one seed, per-purpose sub-seeds).
+  const draftRandom = createRandom(Math.floor(random() * 4294967296));
   const state = {
     player, enemies, bullets, shards, powerups, particles, stars,
     score: 0, lives: LIVES, wave: 0, combo: 0, comboTimer: 0, mult: 1,
     elapsed: 0, kills: 0, waveState: 'breather', breatherTimer: 1.2, spawnTimer: 0,
     shake: 0, flash: 0, bannerText: '', bannerTimer: 0,
+    draft: [], boons: {}, boss: null, won: false, nightsCleared: 0, deathCause: '',
   };
 
   function free(pool) {
@@ -89,7 +122,7 @@ export function createWorld(random) {
 
   function chain() {
     state.combo += 1;
-    state.comboTimer = COMBO.window;
+    state.comboTimer = player.stats.comboWindow;
     state.mult = 1 + Math.min(Math.floor(state.combo / COMBO.perStep), COMBO.maxMult - 1);
   }
 
@@ -107,20 +140,37 @@ export function createWorld(random) {
 
   function spawnEnemy(kind) {
     const slot = free(enemies);
-    if (slot === null) return;
-    const spec = ENEMY[kind];
-    const at = spawnPoint();
+    if (slot === null) return null;
+    const at = kind === KIND_BOSS ? { x: FIELD.width / 2, y: -70 } : spawnPoint();
     slot.active = true;
     slot.kind = kind;
     slot.x = at.x;
     slot.y = at.y;
+    slot.age = 0;
+    slot.phase = random() * Math.PI * 2;
+    slot.minionTimer = 4;
+    if (kind === KIND_BOSS) {
+      const spec = BOSS[state.wave];
+      slot.name = spec.name;
+      slot.hp = spec.hp;
+      slot.maxHp = spec.hp;
+      slot.radius = spec.radius;
+      slot.speed = spec.speed;
+      slot.score = spec.score;
+      slot.shards = 8;
+      slot.vx = 0;
+      slot.vy = 0;
+      state.boss = slot;
+      return slot;
+    }
+    const spec = ENEMY[kind];
+    slot.name = '';
     slot.hp = spec.hp;
+    slot.maxHp = spec.hp;
     slot.radius = spec.radius;
     slot.speed = spec.speed * (1 + (state.wave - 1) * 0.045);
     slot.score = spec.score;
     slot.shards = spec.shards;
-    slot.age = 0;
-    slot.phase = random() * Math.PI * 2;
     if (kind === KIND_DART) {
       // A dart commits to where the player was when it spawned.
       const dx = player.x - at.x;
@@ -132,21 +182,35 @@ export function createWorld(random) {
       slot.vx = 0;
       slot.vy = 0;
     }
+    return slot;
   }
 
   function buildWave(number) {
     queue.length = 0;
-    let budget = 6 + number * 6;
+    if (BOSS_NIGHTS.includes(number)) {
+      // A boss night: the Warden first, then a trickle of its minions.
+      queue.push(KIND_BOSS);
+      const minion = BOSS[number].minion;
+      for (let i = 0; i < 4 + number; i += 1) queue.push(minion);
+      return;
+    }
+    let budget = 8 + number * 7;
     const table = [[10, KIND_DRIFTER]];
-    if (number >= 2) table.push([9, KIND_DART]);
+    if (number >= 2) {
+      table.push([9, KIND_DART]);
+      table.push([5, KIND_WISP]);
+    }
     if (number >= 3) table.push([4, KIND_SPINNER]);
-    if (number >= 4) table.push([3, KIND_SPLITTER]);
+    if (number >= 4) {
+      table.push([3, KIND_SPLITTER]);
+      table.push([3, KIND_BRUTE]);
+    }
     while (budget > 0) {
       const kind = pickWeighted(random, table);
       queue.push(kind);
       budget -= WAVE_COST[kind];
     }
-    // Shuffle the queue so the wave does not arrive in cost order.
+    // Shuffle the queue so the night does not arrive in cost order.
     for (let i = queue.length - 1; i > 0; i -= 1) {
       const j = Math.floor(random() * (i + 1));
       const tmp = queue[i];
@@ -160,8 +224,49 @@ export function createWorld(random) {
     buildWave(number);
     state.waveState = 'spawning';
     state.spawnTimer = 0.4;
-    state.bannerText = `WAVE ${number}`;
-    state.bannerTimer = 2.0;
+    if (BOSS_NIGHTS.includes(number)) {
+      state.bannerText = `NIGHT ${number} — ${BOSS[number].name}`;
+    } else {
+      state.bannerText = `NIGHT ${number} OF ${NIGHTS}`;
+    }
+    state.bannerTimer = 2.4;
+  }
+
+  /** Offer three boons the player has not maxed yet; the draft screen shows them. */
+  function rollDraft() {
+    const open = BOONS.filter((b) => (state.boons[b.id] ?? 0) < b.max);
+    const picks = [];
+    while (picks.length < 3 && open.length > 0) {
+      const at = Math.floor(draftRandom() * open.length);
+      picks.push(open.splice(at, 1)[0].id);
+    }
+    // If everything is maxed (late nights), a heart is always welcome.
+    while (picks.length < 3) picks.push('heart');
+    state.draft = picks;
+    state.waveState = 'draft';
+    // The draft screen has its own title: the night-clear banner must not linger over it.
+    state.bannerTimer = 0;
+    return picks;
+  }
+
+  /** Take one offered boon: apply it, then the next night begins after a breather. */
+  function applyBoon(id) {
+    const stats = player.stats;
+    state.boons[id] = (state.boons[id] ?? 0) + 1;
+    if (id === 'heavy') stats.damage += 1;
+    else if (id === 'rapid') stats.fireInterval *= 0.82;
+    else if (id === 'range') stats.fireRange *= 1.25;
+    else if (id === 'twin') stats.shots += 1;
+    else if (id === 'pierce') stats.pierce += 1;
+    else if (id === 'swift') stats.maxSpeed *= 1.12;
+    else if (id === 'heart') state.lives = Math.min(MAX_LIVES, state.lives + 1);
+    else if (id === 'magnet') stats.magnetRadius *= 1.6;
+    else if (id === 'dash') stats.dashCooldown *= 0.7;
+    else if (id === 'flame') stats.comboWindow += 1;
+    state.draft = [];
+    state.waveState = 'breather';
+    state.breatherTimer = WAVE.breather;
+    return EVENT_BOON;
   }
 
   function dropShard(x, y) {
@@ -192,7 +297,8 @@ export function createWorld(random) {
     state.kills += 1;
     addScore(slot.score);
     chain();
-    burst(slot.x, slot.y, ENEMY[slot.kind].color, PARTICLE.deathBurst, 260);
+    const color = slot.kind === KIND_BOSS ? BOSS[state.wave].color : ENEMY[slot.kind].color;
+    burst(slot.x, slot.y, color, slot.kind === KIND_BOSS ? 40 : PARTICLE.deathBurst, slot.kind === KIND_BOSS ? 320 : 260);
     for (let i = 0; i < slot.shards; i += 1) dropShard(slot.x, slot.y);
     maybeDropPowerup(slot.x, slot.y);
     if (slot.kind === KIND_SPLITTER) {
@@ -206,6 +312,7 @@ export function createWorld(random) {
         child.x = slot.x + (i === 0 ? -14 : 14);
         child.y = slot.y;
         child.hp = spec.hp;
+        child.maxHp = spec.hp;
         child.radius = spec.radius;
         child.speed = spec.speed * 1.15;
         child.score = spec.score;
@@ -215,6 +322,26 @@ export function createWorld(random) {
         child.vx = 0;
         child.vy = 0;
       }
+    }
+    if (slot.kind === KIND_BOSS) {
+      state.boss = null;
+      state.lives = Math.min(MAX_LIVES, state.lives + 1);
+      state.shake = 1;
+      events |= EVENT_BOSS;
+      // The night ends with its Warden: clear the field and the queue.
+      for (const e of enemies) e.active = false;
+      queue.length = 0;
+      if (state.wave >= NIGHTS) {
+        state.won = true;
+        events |= EVENT_WIN;
+        return events;
+      }
+      state.nightsCleared = state.wave;
+      addScore(WAVE.clearBonus * state.wave);
+      state.bannerText = `${slot.name} FALLEN  +${WAVE.clearBonus * state.wave}`;
+      state.bannerTimer = 2.2;
+      rollDraft();
+      return events;
     }
     return events;
   }
@@ -226,15 +353,33 @@ export function createWorld(random) {
     b.active = true;
     b.x = player.x + Math.cos(angle) * nose;
     b.y = player.y + Math.sin(angle) * nose;
-    b.vx = Math.cos(angle) * PLAYER.bulletSpeed;
-    b.vy = Math.sin(angle) * PLAYER.bulletSpeed;
+    b.vx = Math.cos(angle) * player.stats.bulletSpeed;
+    b.vy = Math.sin(angle) * player.stats.bulletSpeed;
     b.life = 0.9;
+    b.pierce = player.stats.pierce;
+    b.last = null;
     return true;
+  }
+
+  function fireVolley(angle) {
+    const shots = player.stats.shots;
+    let fired = false;
+    if (shots === 1) {
+      fired = fireBullet(angle);
+    } else if (shots === 2) {
+      fired = fireBullet(angle - 0.09) || fired;
+      fired = fireBullet(angle + 0.09) || fired;
+    } else {
+      fired = fireBullet(angle - 0.16) || fired;
+      fired = fireBullet(angle) || fired;
+      fired = fireBullet(angle + 0.16) || fired;
+    }
+    return fired;
   }
 
   function nearestEnemy() {
     let best = null;
-    let bestD = PLAYER.fireRange * PLAYER.fireRange;
+    let bestD = player.stats.fireRange * player.stats.fireRange;
     for (const e of enemies) {
       if (!e.active) continue;
       const d = dist2(e.x, e.y, player.x, player.y);
@@ -259,6 +404,7 @@ export function createWorld(random) {
     player.shield = false;
     player.rapidTimer = 0;
     player.magnetTimer = 0;
+    player.stats = defaultStats();
     for (const pool of [enemies, bullets, shards, powerups, particles]) {
       for (const item of pool) item.active = false;
     }
@@ -277,6 +423,12 @@ export function createWorld(random) {
     state.flash = 0;
     state.bannerText = '';
     state.bannerTimer = 0;
+    state.draft = [];
+    state.boons = {};
+    state.boss = null;
+    state.won = false;
+    state.nightsCleared = 0;
+    state.deathCause = '';
   }
 
   /**
@@ -287,7 +439,9 @@ export function createWorld(random) {
   function step(dt, control, harmless) {
     let events = 0;
     state.elapsed += dt;
-    if (state.shake > 0) state.shake = Math.max(0, state.shake - dt * 2.2);
+    // Trauma decays slowly, so a heavy hit still shakes a moment later; the renderer
+    // squares it, so light hits barely move and heavy hits punch (game-feel).
+    if (state.shake > 0) state.shake = Math.max(0, state.shake - dt * 1.6);
     if (state.flash > 0) state.flash = Math.max(0, state.flash - dt * 2.5);
     if (state.bannerTimer > 0) state.bannerTimer = Math.max(0, state.bannerTimer - dt);
     if (state.comboTimer > 0) {
@@ -302,7 +456,28 @@ export function createWorld(random) {
     if (player.rapidTimer > 0) player.rapidTimer -= dt;
     if (player.magnetTimer > 0) player.magnetTimer -= dt;
 
-    // Waves: breather, then spawn the queue, then wait for the field to clear.
+    // During a draft the field holds still: shards and particles drift, nothing else moves.
+    if (state.waveState === 'draft') {
+      for (const p of particles) {
+        if (!p.active) continue;
+        p.life -= dt;
+        if (p.life <= 0) { p.active = false; continue; }
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.vx *= Math.exp(-2.4 * dt);
+        p.vy *= Math.exp(-2.4 * dt);
+      }
+      for (const s of stars) {
+        s.y += 6 * s.factor * dt;
+        if (s.y > FIELD.height + 4) {
+          s.y = -4;
+          s.x = random() * FIELD.width;
+        }
+      }
+      return events;
+    }
+
+    // Nights: breather, then spawn the queue, then wait for the field to clear.
     if (harmless) {
       // The title screen's live backdrop: a few drifters wander in and out, nothing more.
       state.spawnTimer -= dt;
@@ -326,12 +501,12 @@ export function createWorld(random) {
       let any = false;
       for (const e of enemies) if (e.active) { any = true; break; }
       if (!any) {
+        state.nightsCleared = state.wave;
         addScore(WAVE.clearBonus * state.wave);
-        state.bannerText = `WAVE ${state.wave} CLEARED  +${WAVE.clearBonus * state.wave}`;
+        state.bannerText = `NIGHT ${state.wave} CLEARED  +${WAVE.clearBonus * state.wave}`;
         state.bannerTimer = 2.2;
-        state.waveState = 'breather';
-        state.breatherTimer = WAVE.breather;
         events |= EVENT_WAVE;
+        rollDraft();
       }
     }
 
@@ -342,7 +517,7 @@ export function createWorld(random) {
       const sy = len > 0 ? control.steerY / len : 0;
       if (control.dash && player.dashCooldown <= 0 && player.dashTimer <= 0) {
         player.dashTimer = PLAYER.dashTime;
-        player.dashCooldown = PLAYER.dashCooldown;
+        player.dashCooldown = player.stats.dashCooldown;
         player.dashX = len > 0 ? sx : Math.cos(player.angle);
         player.dashY = len > 0 ? sy : Math.sin(player.angle);
         player.invulnerable = Math.max(player.invulnerable, PLAYER.dashTime + 0.08);
@@ -360,9 +535,9 @@ export function createWorld(random) {
         player.vx *= damp;
         player.vy *= damp;
         const speed = Math.hypot(player.vx, player.vy);
-        if (speed > PLAYER.maxSpeed) {
-          player.vx = (player.vx / speed) * PLAYER.maxSpeed;
-          player.vy = (player.vy / speed) * PLAYER.maxSpeed;
+        if (speed > player.stats.maxSpeed) {
+          player.vx = (player.vx / speed) * player.stats.maxSpeed;
+          player.vy = (player.vy / speed) * player.stats.maxSpeed;
         }
       }
       player.x = Math.min(FIELD.width - PLAYER.radius, Math.max(PLAYER.radius, player.x + player.vx * dt));
@@ -376,15 +551,15 @@ export function createWorld(random) {
 
       // Fire: the cannon auto-fires at the nearest enemy in range; holding fire aims at the mouse.
       player.fireTimer -= dt;
-      const interval = player.rapidTimer > 0 ? PLAYER.fireInterval / 2 : PLAYER.fireInterval;
+      const interval = player.rapidTimer > 0 ? player.stats.fireInterval / 2 : player.stats.fireInterval;
       if (player.fireTimer <= 0) {
         if (control.firing) {
-          if (fireBullet(player.angle)) {
+          if (fireVolley(player.angle)) {
             player.fireTimer = interval;
             events |= EVENT_SHOOT;
           }
         } else if (target !== null) {
-          if (fireBullet(player.angle)) {
+          if (fireVolley(player.angle)) {
             player.fireTimer = interval;
             events |= EVENT_SHOOT;
           }
@@ -396,10 +571,33 @@ export function createWorld(random) {
     for (const e of enemies) {
       if (!e.active) continue;
       e.age += dt;
+      if (e.flash > 0) e.flash = Math.max(0, e.flash - dt);
       const dx = player.x - e.x;
       const dy = player.y - e.y;
       const len = Math.hypot(dx, dy) || 1;
-      if (e.kind === KIND_DRIFTER || e.kind === KIND_SPLITTER) {
+      if (e.kind === KIND_BOSS) {
+        // A Warden lumbers after the keeper and calls its minions.
+        e.vx += (dx / len) * e.speed * 2.4 * dt;
+        e.vy += (dy / len) * e.speed * 2.4 * dt;
+        const s = Math.hypot(e.vx, e.vy);
+        if (s > e.speed) {
+          e.vx = (e.vx / s) * e.speed;
+          e.vy = (e.vy / s) * e.speed;
+        }
+        e.minionTimer -= dt;
+        if (e.minionTimer <= 0) {
+          e.minionTimer = 5;
+          let minions = 0;
+          for (const other of enemies) if (other.active && other.kind !== KIND_BOSS) minions += 1;
+          if (minions < 6) {
+            const child = spawnEnemy(BOSS[state.wave].minion);
+            if (child !== null) {
+              child.x = e.x + (random() - 0.5) * 120;
+              child.y = e.y + (random() - 0.5) * 120;
+            }
+          }
+        }
+      } else if (e.kind === KIND_DRIFTER || e.kind === KIND_SPLITTER || e.kind === KIND_BRUTE) {
         e.vx += (dx / len) * e.speed * 2.4 * dt;
         e.vy += (dy / len) * e.speed * 2.4 * dt;
         const s = Math.hypot(e.vx, e.vy);
@@ -415,10 +613,17 @@ export function createWorld(random) {
         const py = dx / len;
         e.vx = (dx / len) * e.speed + px * wobble * e.speed;
         e.vy = (dy / len) * e.speed + py * wobble * e.speed;
+      } else if (e.kind === KIND_WISP) {
+        // A wisp zigzags hard, changing its mind twice a second.
+        const zig = Math.sin(e.age * 6 + e.phase) > 0 ? 1 : -1;
+        const px = -dy / len;
+        const py = dx / len;
+        e.vx = (dx / len) * e.speed * 0.7 + px * zig * e.speed * 0.8;
+        e.vy = (dy / len) * e.speed * 0.7 + py * zig * e.speed * 0.8;
       }
       e.x += e.vx * dt;
       e.y += e.vy * dt;
-      // Strayed far off the field (a dart that missed): recycle it so the wave can end.
+      // Strayed far off the field (a dart that missed): recycle it so the night can end.
       if (e.x < -120 || e.x > FIELD.width + 120 || e.y < -120 || e.y > FIELD.height + 120) {
         if (e.kind === KIND_DART) e.active = false;
         else {
@@ -450,7 +655,8 @@ export function createWorld(random) {
       }
     }
 
-    // Bullets fly, then hit.
+    // Bullets fly, then hit. A piercing bullet keeps flying after a hit, but never hits
+    // the same enemy twice in a row.
     for (const b of bullets) {
       if (!b.active) continue;
       b.x += b.vx * dt;
@@ -461,16 +667,26 @@ export function createWorld(random) {
         continue;
       }
       for (const e of enemies) {
-        if (!e.active) continue;
+        if (!e.active || e === b.last) continue;
         const rr = e.radius + 4;
         if (dist2(b.x, b.y, e.x, e.y) < rr * rr) {
-          b.active = false;
-          e.hp -= PLAYER.bulletDamage;
+          e.hp -= player.stats.damage;
+          e.flash = 0.09;
+          // Knockback: a hit shoves the enemy a little along the bullet, so hits read.
+          e.x += b.vx * 0.004;
+          e.y += b.vy * 0.004;
           burst(b.x, b.y, '#ffe66d', 3, 120);
+          if (b.pierce > 0) {
+            b.pierce -= 1;
+            b.last = e;
+          } else {
+            b.active = false;
+          }
           if (e.hp <= 0) events = killEnemy(e, events);
           break;
         }
       }
+      if (state.won) break;
     }
 
     // Shards drift, sparkle, and get collected (or pulled in by the magnet).
@@ -482,7 +698,7 @@ export function createWorld(random) {
         continue;
       }
       const d = Math.hypot(player.x - s.x, player.y - s.y);
-      if (player.magnetTimer > 0 && d < SHARD.magnetRadius) {
+      if (player.magnetTimer > 0 && d < player.stats.magnetRadius) {
         s.vx += ((player.x - s.x) / (d || 1)) * 900 * dt;
         s.vy += ((player.y - s.y) / (d || 1)) * 900 * dt;
       } else {
@@ -534,14 +750,21 @@ export function createWorld(random) {
             events |= EVENT_HIT;
           } else {
             e.active = false;
-            burst(e.x, e.y, ENEMY[e.kind].color, PARTICLE.deathBurst, 240);
+            burst(e.x, e.y, e.kind === KIND_BOSS ? BOSS[state.wave].color : ENEMY[e.kind].color, PARTICLE.deathBurst, 240);
             state.lives -= 1;
+            state.deathCause = e.kind === KIND_BOSS ? e.name : (DEATH_NAMES[e.kind] ?? 'THE DARK');
             state.combo = 0;
             state.mult = 1;
             state.shake = 1;
             state.flash = 0.7;
             player.invulnerable = PLAYER.invulnerable;
             events |= EVENT_HIT;
+            if (e.kind === KIND_BOSS) {
+              // Touching a Warden hurts, but the Warden does not die to it.
+              e.active = true;
+              e.x = Math.min(FIELD.width - 10, Math.max(10, e.x + (e.x - player.x) * 0.5));
+              e.y = Math.min(FIELD.height - 10, Math.max(10, e.y + (e.y - player.y) * 0.5));
+            }
             if (state.lives <= 0) {
               events |= EVENT_OVER;
               burst(player.x, player.y, '#7df9ff', 40, 320);
@@ -580,5 +803,5 @@ export function createWorld(random) {
   }
 
   reset();
-  return { state, reset, step, startWave };
+  return { state, reset, step, startWave, applyBoon, rollDraft };
 }

@@ -101,5 +101,18 @@ export function createAudio() {
       tone(523, 523, 0.1, 'triangle', 0.14, 0.1);
       tone(659, 659, 0.18, 'triangle', 0.14, 0.2);
     },
+    boss() {
+      // A Warden falls: a low boom, then a rising chime.
+      noise(0.35, 0.5, 900);
+      tone(160, 40, 0.3, 'sawtooth', 0.2);
+      tone(523, 523, 0.12, 'triangle', 0.16, 0.25);
+      tone(659, 659, 0.12, 'triangle', 0.16, 0.37);
+      tone(784, 784, 0.24, 'triangle', 0.16, 0.49);
+    },
+    win() {
+      // The star relights: a slow major arpeggio, low to high.
+      const notes = [523, 659, 784, 1047, 1319];
+      notes.forEach((freq, i) => tone(freq, freq, 0.3, 'triangle', 0.16, i * 0.14));
+    },
   };
 }
