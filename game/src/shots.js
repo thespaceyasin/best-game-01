@@ -1,24 +1,26 @@
-// The screenshot scenes behind ?shot=start|play|boss|win. Each one plays the real rules
+// The screenshot scenes behind ?shot=boss|play|draft|win. Each one plays the real rules
 // forward from a fresh world for a fixed number of steps, steered by an autopilot (flee
 // every close threat, chase shards when safe, dash out when cornered), so the frame is
 // what a real game looks like and the same seed always gives the same frame. The boss
 // and win scenes play whole nights: the pilot takes the strongest offered boon after
-// every cleared night, the way a good player would.
+// every cleared night, the way a good player would. Boss and play scenes are then
+// packed with extra enemies, shards and sparks (shot scenes only) so the frame reads
+// dense, the way the top-40 covers do.
 
 import { FIELD, STEP } from './config.js';
 import { EVENT_OVER, EVENT_WIN } from './world.js';
-import { SCREEN_OVER, SCREEN_PLAY, SCREEN_TITLE, SCREEN_WIN } from './render.js';
+import { SCREEN_DRAFT, SCREEN_OVER, SCREEN_PLAY, SCREEN_TITLE, SCREEN_WIN } from './render.js';
 
 const START_SECONDS = 5;
-const PLAY_SECONDS = 26;
-const BOSS_LIMIT_SECONDS = 300;
-const WIN_LIMIT_SECONDS = 600;
+const PLAY_SECONDS = 400;
+const BOSS_LIMIT_SECONDS = 900;
+const WIN_LIMIT_SECONDS = 900;
 const HORIZON_PLAY = 0.7;
 const THREAT_RADIUS = 300;
 const DASH_RADIUS = 110;
 
 /** Boons in the order a strong run wants them: damage first, then firepower, then the rest. */
-const BOON_ORDER = ['heavy', 'twin', 'rapid', 'pierce', 'range', 'swift', 'dash', 'magnet', 'flame', 'heart'];
+const BOON_ORDER = ['heavy', 'twin', 'rapid', 'impact', 'range', 'swift', 'dash', 'magnet', 'flame', 'heart'];
 
 /** The nearest enemy to the player, and how far away it is. */
 function nearestThreat(state) {
@@ -144,39 +146,64 @@ function countEnemies(state) {
 }
 
 /**
- * Set `world` to the named scene (start, play, boss or win; any other name is start) and
- * return the screen to draw over it and the best score to show.
+ * Set `world` to the named scene (boss, play, draft, win or start; any other name is
+ * start) and return the screen to draw over it and the best score to show.
  */
 export function stageShot(name, world) {
   world.reset();
-  if (name !== 'play' && name !== 'boss' && name !== 'win') {
+  if (name !== 'play' && name !== 'boss' && name !== 'win' && name !== 'draft') {
     for (let index = 0; index < START_SECONDS / STEP; index += 1) world.step(STEP, null, true);
     return { screen: SCREEN_TITLE, best: 0 };
   }
+  if (name === 'draft') {
+    // Stop at the first boon draft, while its three cards are still on offer.
+    const events = playUntil(world, 300, (state) => state.waveState === 'draft');
+    const over = (events & EVENT_OVER) !== 0 || world.state.lives === 0;
+    return { screen: over ? SCREEN_OVER : SCREEN_DRAFT, best: world.state.score };
+  }
   if (name === 'play') {
+    // A busy late-night frame: night 7 or later, eight or more enemies up.
     const events = playUntil(world, PLAY_SECONDS, (state) => {
-      // Stop on a busy mid-wave frame: at least 15 s in, three or more enemies up, so the
-      // shot shows the fight, not the quiet moment after a wave clears.
-      return state.elapsed >= 15 && countEnemies(state) >= 3;
+      return state.wave >= 7 && countEnemies(state) >= 8;
     });
     const over = (events & EVENT_OVER) !== 0 || world.state.lives === 0;
+    if (!over) world.densifyField(5, 10);
     return { screen: over ? SCREEN_OVER : SCREEN_PLAY, best: world.state.score };
   }
   if (name === 'boss') {
-    // Play through nights 1-2, then stop a few seconds into the first Warden fight: the
-    // boss is on screen, hurt, with its health bar and name showing.
+    // Play through nights 1-8, then stop a few seconds into the Void King fight: the
+    // boss is on screen, hurt, with its health bar, name and phase marker showing.
+    // The boss art is ~264 px tall now (octopus at grow 1.6, drawn in a square of
+    // radius*2.4*grow, so 1.9x would push the octopus's top into the night track
+    // at the staging height (y 260).
+    // Fix v4: y > 260 (the proven v2/v3 threshold) NO LONGER FIRES in seed 2.
+    // the run now kills the boss before it walks that far down (Impact Burst
+    // adds +1 damage per stack where Piercing Shot added none, and
+    // non-piercing bullets focus fire instead of passing through minions), so
+    // the boss scene played through to the win and the cover came back as an
+    // empty post-kill field (+3000 popup, no boss). y > 220 fires while the
+    // boss is still alive and well on screen; its top then sits just under
+    // the night track and the label drops below the art automatically.
+    // Do NOT add a player-position condition here: the boss retreats upward after
+    // the keeper, so any extra wait lets its y slip back below the threshold and
+    // the staging times out (tried in fix v3, the cover came back as the
+    // post-kill field).
     let bossSince = -1;
     const events = playUntil(world, BOSS_LIMIT_SECONDS, (state) => {
-      if (state.boss !== null && state.boss.active) {
+      if (state.boss !== null && state.boss.active && state.wave === 9) {
         if (bossSince < 0) bossSince = state.elapsed;
-        // The Warden walks in from above: wait until it is fully on screen (name label
-        // and crown clear of the top edge) as well as hurt.
-        return state.boss.hp < state.boss.maxHp && state.boss.y > 140 && state.elapsed - bossSince >= 2.5;
+        // The Warden walks in from above: wait until it is fully on screen (art
+        // clear of the health bar and night track) as well as hurt, and until
+        // the centre banner (wave / ENRAGED) has cleared, so it does not paint
+        // across the boss's head in the cover. If the boss dies first the scene
+        // falls through to the win/over screen, same as before.
+        return state.boss.hp < state.boss.maxHp && state.boss.y > 220 && state.elapsed - bossSince >= 1.5 && state.bannerTimer <= 0 && state.boss.flash <= 0;
       }
       bossSince = -1;
       return false;
     });
     const over = (events & EVENT_OVER) !== 0 || world.state.lives === 0;
+    if (!over) world.densifyField(8, 12);
     return { screen: over ? SCREEN_OVER : SCREEN_PLAY, best: world.state.score };
   }
   // Win: play the whole run. The strong pilot plus the best boons each night is what a

@@ -30,13 +30,22 @@ Then open http://localhost:8080 in a desktop browser.
 - **Boons** — after each cleared night, choose 1 of 3 ember-boons (press 1, 2 or 3, or
   click a card): heavier shots, twin cannon, piercing shots, longer range, faster wings,
   quicker dash, magnet core, combo flame, ember hearts.
-- **Bosses** — a Night Warden arrives on nights 3, 6 and 9, each with its own minions.
-  Defeat the Void King on night 9 to win. A Warden's fall restores a life.
+- **Bosses** — a Night Warden arrives on nights 3, 6 and 9, each with its own minions
+  and its own silhouette. Defeat the Void King on night 9 to win — and beware: at half
+  health he enrages, faster and calling more minions. A Warden's fall restores a life.
+- **Difficulties** — pick your flame on the title screen: Ember (×1), Lantern (×1.25,
+  tougher Hollow) or Inferno (×1.5, for keepers only). Keys 1–3, or click.
+- **Endless** — win once to unlock it (E on the title screen): survive past night 9,
+  the Wardens return in turn, and the nights never stop.
+- **Feats** — eight feats (First Light, Warden Slayer, Void King, Flawless Night,
+  Chain 40, Rich Keeper, Full Build, Inferno Keeper), tracked across runs in
+  localStorage and shown locked or earned on the title screen.
 - **Pause** — P or Esc. **Mute** — M.
 - **Score** — kills and shards, multiplied by your combo. Clearing a night pays a bonus.
   Pick up power-ups: **S** shield, **R** rapid fire, **M** magnet.
-- **Death** — the game over screen names the run: the night reached, what felled you,
-  the seed, and your rank.
+- **Death** — the game over screen is a full report card: grade, run stats, score by
+  night, boons built, feats earned, the seed, and your rank — with Fly again, Same
+  seed, and Menu.
 
 ## The code
 
@@ -48,15 +57,20 @@ Then open http://localhost:8080 in a desktop browser.
   `world.js` (rules and state: nights, Wardens, boon draft, combat), `render.js`
   (canvas drawing, HUD and screens), `shots.js` (deterministic screenshot scenes and
   the autopilot), `main.js` (boot, the game loop, hit-stop and the screen stack).
-- `screenshots/` — real renders of the game in a browser: title, play, boss fight and
-  victory.
+- `screenshots/` — real renders of the game in a browser: the night-9 Void King boss
+  fight (cover), late-night play with the full HUD, the boon draft, and the victory
+  report card.
 - `vendor/makefun-game.ts` — the kit's dossier library, unchanged.
 
 ## Screenshots
 
 The four screenshots come from the game's own `?shot=` scenes, each played forward
-from the same seed (`?shot=start&seed=1`, `?shot=play&seed=1`, `?shot=boss&seed=1`,
-`?shot=win&seed=1`).
+from a fixed seed: `?shot=boss&seed=1` (cover), `?shot=play&seed=7`, `?shot=draft&seed=1`,
+`?shot=win&seed=1`. The title screen is a full pitch — goal, win and lose boxes, a
+three-step how-to, a bestiary of all six Hollow kinds and the three Wardens, difficulty
+choice, feats, and best/last-run lines — and the HUD carries the win/lose line, the
+incoming list for the next wave, a night-progress track with boss markers, the best
+score, floating score popups, and a bottom ability bar (dash, shield, magnet).
 
 ---
 

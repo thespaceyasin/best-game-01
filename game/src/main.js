@@ -6,13 +6,14 @@
 // ?seed=N fixes the night pattern. ?shot=start|play|boss|win (with &seed=N) stages that
 // scene instead of running the loop, paints it twice and sets window.__shotReady for a
 // screenshot.
-import { BEST_KEY, LIVES, NIGHTS, STEP } from './config.js';
+import { BEST_KEY, DIFFICULTY_ORDER, FEATS_KEY, LAST_KEY, LIVES, NIGHTS, STEP, WON_KEY } from './config.js';
 import { createRandom } from './random.js';
 import { createWorld, EVENT_BOON, EVENT_BOSS, EVENT_DASH, EVENT_HIT, EVENT_OVER, EVENT_PICKUP, EVENT_POWERUP, EVENT_SHOOT, EVENT_WAVE, EVENT_WIN } from './world.js';
-import { ACTION_CONFIRM, ACTION_DASH, ACTION_MUTE, ACTION_PAUSE, ACTION_PICK1, ACTION_PICK2, ACTION_PICK3, createInput } from './input.js';
-import { createRenderer, SCREEN_DRAFT, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE, SCREEN_WIN, draftCardAt } from './render.js';
+import { ACTION_CONFIRM, ACTION_DASH, ACTION_ENDLESS, ACTION_MUTE, ACTION_PAUSE, ACTION_PICK1, ACTION_PICK2, ACTION_PICK3, ACTION_SEED, createInput } from './input.js';
+import { createRenderer, SCREEN_DRAFT, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE, SCREEN_WIN, draftCardAt, reportClickAt, titleClickAt } from './render.js';
 import { createAudio } from './audio.js';
 import { stageShot } from './shots.js';
+import { loadSprites } from './sprites.js';
 
 /** The longest frame the loop catches up on; a longer stall (a hidden tab) is dropped, not replayed. */
 const MAX_FRAME = 0.25;
@@ -20,11 +21,11 @@ const MAX_FRAME = 0.25;
 const params = new URLSearchParams(window.location.search);
 const shot = params.get('shot');
 const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
-const seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() * 4294967296);
+let seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() * 4294967296);
 
 const canvas = document.getElementById('game');
 const status = document.getElementById('status');
-const world = createWorld(createRandom(seed));
+let world = createWorld(createRandom(seed));
 const renderer = createRenderer(canvas);
 const audio = createAudio();
 
@@ -44,11 +45,63 @@ function saveBest(value) {
   }
 }
 
+/** Profile state (kept across runs): unlocked feats, whether the star was ever relit. */
+function readFeats() {
+  try {
+    const raw = window.localStorage.getItem(FEATS_KEY);
+    return raw ? new Set(JSON.parse(raw)) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function saveFeats(feats) {
+  try {
+    window.localStorage.setItem(FEATS_KEY, JSON.stringify([...feats]));
+  } catch {
+    // Storage can be off: feats then last this visit only.
+  }
+}
+
+function readLast() {
+  try {
+    const raw = window.localStorage.getItem(LAST_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveLast(run) {
+  try {
+    window.localStorage.setItem(LAST_KEY, JSON.stringify(run));
+  } catch {
+    // Storage can be off.
+  }
+}
+
+function readWon() {
+  try {
+    return window.localStorage.getItem(WON_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function saveWon() {
+  try {
+    window.localStorage.setItem(WON_KEY, '1');
+  } catch {
+    // Storage can be off.
+  }
+}
+
 function runShot(name) {
   const scene = stageShot(name, world);
+  const meta = { difficulty: 'ember', endless: false, feats: [], lastRun: null, won: false, runFeats: world.runFeats() };
   let painted = 0;
   function paint() {
-    renderer.draw(world.state, scene.screen, scene.best, false, seed);
+    renderer.draw(world.state, scene.screen, scene.best, false, seed, meta);
     painted += 1;
     if (painted < 2) requestAnimationFrame(paint);
     else window.__shotReady = true;
@@ -60,6 +113,12 @@ function runGame() {
   const input = createInput(canvas, (x, y) => renderer.toField(x, y));
   let screen = SCREEN_TITLE;
   let best = readBest();
+  let feats = readFeats();
+  let lastRun = readLast();
+  let won = readWon();
+  let difficulty = 'ember';
+  let endless = false;
+  let runFeats = [];
   let accumulator = 0;
   let last = performance.now();
   let dashQueued = false;
@@ -77,31 +136,54 @@ function runGame() {
     status.textContent = message;
   }
 
-  function startGame() {
+  /** Everything the title and report screens need, rebuilt every frame. */
+  function meta() {
+    return { difficulty, endless, feats: [...feats], lastRun, won, runFeats };
+  }
+
+  function startGame(sameSeed) {
     audio.unlock();
-    world.reset();
+    if (!sameSeed) seed = Math.floor(Math.random() * 4294967296);
+    world = createWorld(createRandom(seed), { difficulty, endless });
+    runFeats = [];
     accumulator = 0;
     dashQueued = false;
     screen = SCREEN_PLAY;
-    announce(`Playing. ${LIVES} lives. Nine nights to survive.`);
+    announce(`Playing. Three lives. Nine nights between the Hollow and the last ember.`);
   }
 
-  function endGame() {
-    screen = SCREEN_OVER;
+  function finishRun(didWin) {
+    runFeats = world.runFeats();
+    for (const id of runFeats) feats.add(id);
+    saveFeats(feats);
+    lastRun = { score: world.state.score, wave: world.state.wave, won: didWin, difficulty };
+    saveLast(lastRun);
     if (world.state.score > best) {
       best = world.state.score;
       saveBest(best);
     }
+    if (didWin) {
+      won = true;
+      saveWon();
+    }
+  }
+
+  function endGame() {
+    finishRun(false);
+    screen = SCREEN_OVER;
     announce(`Game over. Score ${world.state.score}. Best ${best}. Night ${world.state.wave} of ${NIGHTS}. Felled by ${world.state.deathCause || 'the dark'}. Seed ${seed}.`);
   }
 
   function winGame() {
+    finishRun(true);
     screen = SCREEN_WIN;
-    if (world.state.score > best) {
-      best = world.state.score;
-      saveBest(best);
-    }
     announce(`Victory. The star lives. Score ${world.state.score}. Best ${best}.`);
+  }
+
+  function goMenu() {
+    world.reset();
+    screen = SCREEN_TITLE;
+    announce('Emberfall. Vaelith is dying. Nine nights stand between the Hollow and its last ember. Press Space or click to start.');
   }
 
   function handleActions() {
@@ -109,6 +191,31 @@ function runGame() {
     if (actions & ACTION_MUTE) {
       muted = audio.toggleMute();
       announce(muted ? 'Muted.' : 'Sound on.');
+    }
+    if (screen === SCREEN_TITLE) {
+      if (actions & ACTION_PICK1) difficulty = DIFFICULTY_ORDER[0];
+      else if (actions & ACTION_PICK2) difficulty = DIFFICULTY_ORDER[1];
+      else if (actions & ACTION_PICK3) difficulty = DIFFICULTY_ORDER[2];
+      if (actions & ACTION_ENDLESS && won) endless = !endless;
+      const click = input.takeClick();
+      if (click !== null) {
+        const hit = titleClickAt(click.x, click.y);
+        if (hit !== null) {
+          if (hit.difficulty) {
+            difficulty = hit.difficulty;
+            endless = false;
+          } else if (hit.endless && won) {
+            endless = !endless;
+          }
+          return;
+        }
+        audio.unlock();
+        startGame(false);
+      } else if (actions & ACTION_CONFIRM) {
+        audio.unlock();
+        startGame(false);
+      }
+      return;
     }
     if (screen === SCREEN_DRAFT) {
       // A draft pick: key 1/2/3, or a click on a card.
@@ -127,11 +234,26 @@ function runGame() {
       }
       return;
     }
+    if (screen === SCREEN_WIN || screen === SCREEN_OVER) {
+      const click = input.takeClick();
+      if (click !== null) {
+        const hit = reportClickAt(click.x, click.y);
+        if (hit === 'again') startGame(false);
+        else if (hit === 'seed') startGame(true);
+        else if (hit === 'menu') goMenu();
+        return;
+      }
+      if (actions & ACTION_SEED) {
+        startGame(true);
+      } else if (actions & (ACTION_PAUSE | ACTION_CONFIRM)) {
+        // Esc/P goes back to the menu; Space/Enter flies again.
+        if (actions & ACTION_PAUSE) goMenu();
+        else startGame(false);
+      }
+      return;
+    }
     input.takeClick();
-    if (actions & ACTION_CONFIRM && (screen === SCREEN_TITLE || screen === SCREEN_OVER || screen === SCREEN_WIN)) {
-      audio.unlock();
-      startGame();
-    } else if (actions & ACTION_PAUSE && screen === SCREEN_PLAY) {
+    if (actions & ACTION_PAUSE && screen === SCREEN_PLAY) {
       screen = SCREEN_PAUSED;
       announce('Paused.');
     } else if (actions & (ACTION_PAUSE | ACTION_CONFIRM) && screen === SCREEN_PAUSED) {
@@ -196,7 +318,7 @@ function runGame() {
     playEvents(world.step(STEP, control, false));
     if (world.state.waveState === 'draft' && screen === SCREEN_PLAY) {
       screen = SCREEN_DRAFT;
-      announce(`Night ${world.state.wave} cleared. Choose a boon: press 1, 2 or 3.`);
+      announce(`Night ${world.state.wave} held. Take one ember: press 1, 2 or 3.`);
     }
   }
 
@@ -207,7 +329,7 @@ function runGame() {
     if (now < hitStopUntil) {
       accumulator = 0;
       last = now;
-      renderer.draw(world.state, screen, best, muted, seed);
+      renderer.draw(world.state, screen, best, muted, seed, meta());
       return;
     }
     accumulator += Math.min((now - last) / 1000, MAX_FRAME);
@@ -220,7 +342,7 @@ function runGame() {
     } else {
       accumulator = 0;
     }
-    renderer.draw(world.state, screen, best, muted, seed);
+    renderer.draw(world.state, screen, best, muted, seed, meta());
   }
 
   // Leaving the tab pauses a running game rather than letting enemies close in unseen.
@@ -231,9 +353,13 @@ function runGame() {
     }
   });
 
-  announce('Emberfall. Nine nights of the last star. Press Space or click to start.');
+  announce('Emberfall. Vaelith is dying. Nine nights stand between the Hollow and its last ember. Press Space or click to start.');
   requestAnimationFrame(frame);
 }
+
+// Sprite art loads before the first frame (and before __shotReady), so a staged
+// scene always paints with the art in place; the sim never depends on it.
+await loadSprites();
 
 if (shot) runShot(shot);
 else runGame();

@@ -10,6 +10,8 @@ export const ACTION_MUTE = 8;
 export const ACTION_PICK1 = 16;
 export const ACTION_PICK2 = 32;
 export const ACTION_PICK3 = 64;
+export const ACTION_SEED = 128;
+export const ACTION_ENDLESS = 256;
 
 const LEFT = new Set(['ArrowLeft', 'KeyA']);
 const RIGHT = new Set(['ArrowRight', 'KeyD']);
@@ -19,6 +21,8 @@ const CONFIRM = new Set(['Space', 'Enter']);
 const DASH = new Set(['ShiftLeft', 'ShiftRight', 'KeyJ']);
 const PAUSE = new Set(['KeyP', 'Escape']);
 const MUTE = new Set(['KeyM']);
+const SEED = new Set(['KeyR']);
+const ENDLESS = new Set(['KeyE']);
 const PICK = new Map([['Digit1', ACTION_PICK1], ['Digit2', ACTION_PICK2], ['Digit3', ACTION_PICK3]]);
 
 export function createInput(target, toField) {
@@ -52,6 +56,10 @@ export function createInput(target, toField) {
       if (!event.repeat) actions |= ACTION_PAUSE;
     } else if (MUTE.has(event.code)) {
       if (!event.repeat) actions |= ACTION_MUTE;
+    } else if (SEED.has(event.code)) {
+      if (!event.repeat) actions |= ACTION_SEED;
+    } else if (ENDLESS.has(event.code)) {
+      if (!event.repeat) actions |= ACTION_ENDLESS;
     } else if (PICK.has(event.code)) {
       if (!event.repeat) actions |= PICK.get(event.code);
     } else return;
